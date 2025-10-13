@@ -1,0 +1,498 @@
+---
+title: "Evaluating Point Mutation Tolerance of the SGC"
+subtitle: "Comparing the SGC with 10,000 Randomly Generated Codes" 
+author: "Bayan Abou Rekbeh - CSB195"
+date: last-modified
+format:
+  html:
+    toc: true
+    number-sections: true
+execute:
+  echo: true
+  warning: false
+  message: false
+
+---
+
+# Abstract
+This report evaluates whether the SGC is unusually tolerant to point mutations. The analysis measures how similar the encoded amino acids remain after every possible single-base substitution. The SGC's score was compared to 10,000 randomly generated genetic codes that are valid biologically. The SGC achieved a substantially lower (better) score than all random alternatives, suggesting that its structure is highly non-random and reflects evolutionary optimization to minimize the effects of point mutations. 
+
+
+# Limitations  
+ - *Amino Acid Similarity:* `aaSim()` approximates biochemical similarity of amino acids and may not capture all functional relationships 
+ - *Genetic Code Constraints:* Random codes preserve SGC degeneracy
+ - *Scope:* No modeling of codon usage or protein context 
+
+# Method 
+
+The SGC was evaluated by comparing amino acid similarities for all 64 codons and their nine single-base neighbors. Ten thousand random genetic codes were generated and evaluated with the same method and saved for analysis. Summary statistics and histogram were produced to compare SGC's performance against random codes. 
+
+
+# The Experiment
+## SGC Quality Score 
+
+We measure how tolerant the SGC is to point-mutations by comparing how similar amino acids remain after each possible point mutation 
+
+### Amino-Acid Similarity Function `aaSim()`: 
+
+`aaSim()` is being rebuild using CSB195 course material (Stepie, 2025). It measures how similar two amino acids are by computing their Euclidean distance in a multi-dimensional “feature space” built from biochemical properties such as charge, polarity, and volume.
+
+Smaller distance → greater similarity
+
+```{r}
+
+# Construct the aaSim() function
+aaSimConstructor <- function() {
+  spaceFile <- "dat/aaFeatureSpace.4.1.Rds"
+  stopDistFactor <- 1.5  # distance multiplier for stop codon
+
+  # Download feature space if missing
+  if (!file.exists(spaceFile)) {
+    ghUrl <- paste0("https://raw.githubusercontent.com/hyginn/CSB195/main/", spaceFile)
+      download.file(url = ghUrl, destfile = spaceFile, mode = "wb")
+    }
+  
+    aaSpace <- readRDS(spaceFile)
+    nAA <- nrow(aaSpace)
+    aaDist <- matrix(0, nrow = nAA, ncol = nAA)
+  
+  # Compute Euclidean distances for all amino-acid pairs
+  for (i in seq_len(nAA)) {
+    for (j in seq_len(nAA)) {
+      aaDist[i, j] <- sqrt(sum((aaSpace[i, ] - aaSpace[j, ])^2))
+      }
+    }
+  
+  # Add stop codon distances
+  maxD <- max(aaDist)
+  stopD <- stopDistFactor * maxD
+  aaDist <- rbind(aaDist, stopD)
+  aaDist <- cbind(aaDist, c(rep(stopD, nAA), 0))
+  rownames(aaDist) <- c(rownames(aaSpace), "*")
+  colnames(aaDist) <- c(rownames(aaSpace), "*")
+  
+  myFun <- function(a1, a2) {
+    return(aaDist[a1, a2])
+  }
+  
+  attr(myFun, "AADMAT") <- aaDist
+  attr(myFun, "alphabet") <- rownames(aaDist)
+  return(myFun)
+  }
+
+# Create aaSim() from the constructor
+aaSim <- aaSimConstructor()
+```
+
+### Load the SGC and Define Helpers
+
+The Standard Genetic Code (SGC) was obtained from the National Center for Biotechnology Information (NCBI, 2024).
+
+We load `dat/SGC.csv`, convert codons to RNA alphabet (use "U" not "T"), and then build small helper functions:
+
+  `translate()` maps codons to amino acids 
+
+  `neighbor9()` lists the nine possible single-base neighbors for each codon 
+
+
+```{r}
+# Parameters (no magic numbers)
+datDir        <- "dat"
+sgcFile       <- file.path(datDir, "SGC.csv")
+bases         <- c("A","U","G","C")     # RNA alphabet
+expectedScore <- 9856.116
+tol           <- 1e-6
+
+# Read SGC (assumes two columns: codon, aa; tolerant to names/order)
+sgc <- utils::read.csv(sgcFile, stringsAsFactors = FALSE)
+names(sgc) <- tolower(names(sgc))
+
+codonCol <- if ("codon" %in% names(sgc)) "codon" else names(sgc)[1]
+aaCol    <- if (any(names(sgc) %in% c("aa","amino","aminoacid"))) {
+              intersect(c("aa","amino","aminoacid"), names(sgc))[1]
+            } else names(sgc)[2]
+
+# Normalize: uppercase, RNA alphabet (T -> U)
+sgc[ , codonCol] <- chartr("T", "U", toupper(sgc[ , codonCol]))
+sgc[ , aaCol]    <- toupper(sgc[ , aaCol])
+
+# Named vector: codon -> AA (use "*" for stop)
+codeMap <- setNames(sgc[ , aaCol], sgc[ , codonCol])
+
+# Validations
+stopifnot(length(codeMap) == 64)
+stopifnot(all(nchar(names(codeMap)) == 3))
+stopifnot(all(strsplit(paste(names(codeMap), collapse = ""), "")[[1]] %in% bases))
+stopifnot("*" %in% codeMap)    # at least one stop codon
+stopifnot(setequal(names(codeMap), as.vector(outer(outer(bases, bases, paste0), bases, paste0))))
+stopifnot(!any(is.na(codeMap)))
+
+# All 64 codons in RNA (explicit enumeration)
+allCodons <- as.vector(outer(outer(bases, bases, paste0), bases, paste0))
+stopifnot(length(allCodons) == 64)
+
+# Exactly-one-position neighbors (9 per codon)
+neighbor9 <- function(codon) {
+  out <- character(0)
+  for (pos in 1:3) {
+    orig <- substr(codon, pos, pos)
+    alts <- bases[bases != orig]
+    for (a in alts) {
+      newCodon <- codon
+      substr(newCodon, pos, pos) <- a
+      out <- c(out, newCodon)
+    }
+  }
+  return(out)
+}
+
+# translate() via the SGC map
+translate <- function(codon) {
+  aa <- codeMap[codon]
+  if (is.na(aa)) stop(sprintf("Unknown codon: %s", codon))
+  return(aa)
+}
+
+# Quick neighbor sanity check: 9 per codon
+stopifnot(all(vapply(allCodons, function(cd) length(neighbor9(cd)), integer(1)) == 9))
+
+#Quick test: 
+#aaSim('Q', 'Q')
+#aaSim('Q', 'F')
+#aaSim('F', 'Q')
+#aaSim("G", "C") + aaSim("C", "W") <= aaSim("G", "W")
+
+```
+
+### Compute the SGC Quality Score 
+
+For each of the 64 codons, we compare its amino acid with those of its 9 single-base neighbors (64 × 9 = 576 total pairs)
+We use `aaSim()` to measure how similar the two amino acids are and add the value to the total 
+
+```{r}
+totalScore <- 0.0
+
+for (cd in allCodons) {
+  aa1 <- translate(cd)
+  for (nd in neighbor9(cd)) {
+    aa2 <- translate(nd)
+    totalScore <- totalScore + aaSim(aa1, aa2)
+  }
+}
+
+totalScore
+
+cat(sprintf("SGC total similarity: %.6f\n", totalScore))
+
+
+# Verify against the expected score
+
+if (!isTRUE(all.equal(totalScore, expectedScore, tolerance = tol))) {
+  stop(sprintf(
+    "SGC benchmark mismatch: got %.6f, expected %.6f.\nCheck neighbor9(), translation, or aaSim().",
+    totalScore, expectedScore
+  ))
+} else {
+  cat(sprintf("OK: SGC quality = %.6f (matches expected %.6f)\n",
+              totalScore, expectedScore))
+}
+
+```
+
+## Random Genetic Codes
+
+We need to generate thousands of random genetic codes that preserves biological constraints, compute their quality scores, then compare the SGC score to them
+
+### Setup
+We define reproducible parameters `N = 10,000, seed = 123`
+
+We define helper functions:
+
+  `translateWith(codon, codeMaplocal)`: returns the amino acid encoded by a given codon under any provided genetic code map 
+  
+  `scoreCode(codeMaplocal)`: computes the total similarity score for a complete code
+
+```{r}
+# Preconditions: these were defined earlier
+stopifnot(exists("aaSim"), exists("neighbor9"), exists("codeMap"))
+
+# Alphabet and codon universe
+bases <- c("A","U","G","C")
+allCodons <- as.vector(outer(outer(bases, bases, paste0), bases, paste0))
+
+# ---- Parameters (no magic numbers) ----
+nCodes      <- 10000
+seedBase    <- 123
+outFile     <- "out/random_code_qualities.csv"
+expectedSGC <- 9856.116
+tol         <- 1e-6
+
+# ---- Helpers ----
+# Translate with an arbitrary code map (does not touch global codeMap)
+translateWith <- function(codon, codeMapLocal) {
+  aa <- codeMapLocal[codon]
+  if (is.na(aa)) stop(sprintf("Unknown codon: %s", codon))
+  return(aa)
+}
+
+# Score a code: sum aaSim() across 64 codons × 9 neighbors
+scoreCode <- function(codeMapLocal) {
+  total <- 0.0
+  for (cd in allCodons) {
+    aa1 <- translateWith(cd, codeMapLocal)
+    for (nd in neighbor9(cd)) {
+      aa2 <- translateWith(nd, codeMapLocal)
+      total <- total + aaSim(aa1, aa2)
+    }
+  }
+  return(total)
+}
+
+# Degeneracy pattern from SGC (counts per AA, stops excluded)
+sgcDegeneracy <- sort(table(codeMap[codeMap != "*"]), decreasing = TRUE)
+
+# Sense-codon groups from SGC (one group per AA); stops fixed
+senseGroups <- split(names(codeMap)[codeMap != "*"], codeMap[codeMap != "*"])
+stopCodons  <- names(codeMap)[codeMap == "*"]
+stopifnot(length(stopCodons) == 3)
+
+```
+
+### Random-code Generator 
+We create random codes by permuting amino-acid labels among SGC codon groups while keeping:
+  20 amino acids present, 
+  3 stop codons, and 
+  same amino acid redundancies 
+
+Each code's total similarity score is computed using the same method as for the SGC
+
+```{r}
+# Generator: permute the 20 AA labels across SGC sense groups (preserves degeneracy)
+makeRandomCode <- function() {
+  aaLabels <- names(senseGroups)
+  permuted <- sample(aaLabels, length(aaLabels), replace = FALSE)
+  names(permuted) <- aaLabels  # map: original-AA -> new-AA
+
+  cmap <- setNames(rep(NA_character_, 64), allCodons)
+  for (origAA in names(senseGroups)) {
+    newAA <- permuted[origAA]
+    cmap[senseGroups[[origAA]]] <- newAA
+  }
+  cmap[stopCodons] <- "*"  # keep stops fixed
+  return(cmap)
+}
+
+# Validator: exact constraints of the assignment
+validateCode <- function(cmap) {
+  if (length(cmap) != 64) return(FALSE)               # 64 codons
+  if (sum(cmap == "*") != 3) return(FALSE)            # exactly 3 stops
+  aas <- cmap[cmap != "*"]
+  if (length(unique(aas)) != 20) return(FALSE)        # all 20 AAs present
+  deg <- sort(table(aas), decreasing = TRUE)          # exact degeneracy
+  if (!identical(unname(deg), unname(sgcDegeneracy))) return(FALSE)
+  if (!setequal(names(cmap), allCodons)) return(FALSE) # all codons present
+  return(TRUE)
+}
+
+# Score SGC once and assert benchmark before proceeding
+sgcQuality <- scoreCode(codeMap)
+stopifnot(isTRUE(all.equal(sgcQuality, expectedSGC, tolerance = tol)))
+
+#Batch: generate N random valid codes and score them (with per-code seeds)
+seedTags <- seedBase + seq_len(nCodes) - 1L   # reproducible tag per code
+qualVec  <- numeric(nCodes)
+
+for (i in seq_len(nCodes)) {
+  set.seed(seedTags[i])                       # deterministic per-code generation
+  cmap <- makeRandomCode()
+  if (!validateCode(cmap)) stop("Random code failed validation; check generator.")
+  qualVec[i] <- scoreCode(cmap)
+}
+
+
+```
+
+### Save Results
+We save all results to `out/random_code_qualities.csv`
+
+Summary statistics are printed (mean, SD, min, max) and the percentage rank of the SGC within the random distribution 
+
+```{r}
+# Ensure output directory exists 
+if (!dir.exists("out")) dir.create("out", recursive = TRUE)
+
+# Save CSV including SGC as first row
+res <- data.frame(
+  codeId  = c("SGC", paste0("RAND_", seq_len(nCodes))),
+  seed = c(seedBase, seedTags),
+  quality = c(sgcQuality, qualVec),
+  row.names = NULL
+)
+utils::write.csv(res, file = outFile, row.names = FALSE)
+
+# Summary statistics + SGC percentile rank
+m <- mean(qualVec); s <- sd(qualVec)
+mn <- min(qualVec); mx <- max(qualVec)
+pctRank <- mean(qualVec <= sgcQuality) * 100  # SGC position vs random
+
+cat(sprintf("Random codes: N=%d\n", nCodes))
+cat(sprintf("Mean = %.3f | SD = %.3f | Min = %.3f | Max = %.3f\n", m, s, mn, mx))
+cat(sprintf("SGC quality = %.3f | Percentile among random = %.2f%%\n", sgcQuality, pctRank))
+cat(sprintf("Saved file: %s\n", outFile))
+```
+
+## Random-code Quality Distribution
+We visualize how the SGC compares to random codes in terms of point mutation tolerance 
+
+### Load Results 
+We read quality scores from the CSV file and separate the SGC from random codes
+
+```{r}
+# Inputs / outputs
+inFiles <- c("out/random_code_qualities.csv", "dat/random_code_qualities.csv")
+inFile  <- inFiles[file.exists(inFiles)][1]
+if (is.na(inFile)) stop("Could not find results CSV in 'out/' or 'dat/'.")
+
+outPng <- "out/random_code_quality_histogram.png"
+
+# Read results
+res <- utils::read.csv(inFile, stringsAsFactors = FALSE)
+
+# Split SGC vs random
+sgcQuality <- res$quality[res$codeId == "SGC"]
+randQual   <- res$quality[res$codeId != "SGC"]
+
+cat(sprintf("Random codes (N=%d): mean=%.3f, sd=%.3f, min=%.3f, max=%.3f\n",
+            length(randQual), m, s, mn, mx))
+cat(sprintf("SGC quality=%.3f | Percentile rank (<= SGC)=%.2f%%\n",
+            sgcQuality, pctRank))
+
+# Axis and binning (ensure SGC is inside range; readable ticks)
+xPad       <- 100
+xMin       <- min(mn, sgcQuality) - xPad
+xMax       <- max(mx, sgcQuality) + xPad
+targetBins <- 32
+binWidth   <- (xMax - xMin) / targetBins
+breaksSeq  <- seq(from = xMin, to = xMax, by = binWidth)
+
+# Prepare hist object (no plotting yet)
+h    <- graphics::hist(randQual, breaks = breaksSeq, plot = FALSE)
+ylim <- c(0, max(h$counts) * 1.1)
+
+# Ticks every ~200 units (adjust if range is narrow)
+tickStep <- 200
+ticks <- seq(from = ceiling(xMin / tickStep) * tickStep,
+             to   = floor(xMax  / tickStep) * tickStep,
+             by   = tickStep)
+
+
+```
+
+### Plot Histogram 
+
+We plot a histogram of random-code scores 
+
+The figure shows 10,000 random codes with the SGC score highlighted as a red vertical line 
+
+
+```{r}
+# Single function to draw the figure (used twice)
+drawQualityHist <- function(histObj, xMin, xMax, ylim, ticks, sgcQuality,
+                            mainTitle, captionText) {
+  barFill <- "#E9EEF3"; barEdge <- "#8AA1B1"; sgcCol <- "#D62728"
+
+  graphics::plot(histObj,
+                 col    = barFill, border = barEdge,
+                 main   = mainTitle,
+                 xlab   = "Figure (1) Total similarity score (sum over 576 codon–neighbor pairs)",
+                 ylab   = "Number of random codes",
+                 xlim   = c(xMin, xMax),
+                 ylim   = ylim,
+                 xaxt   = "n")
+  graphics::axis(1, at = ticks)
+  graphics::abline(v = sgcQuality, col = sgcCol, lwd = 3)
+  graphics::text(x = sgcQuality, y = max(histObj$counts) * 1.05,
+                 labels = sprintf("SGC = %.3f", sgcQuality),
+                 pos = 4, cex = 0.9, col = sgcCol, xpd = NA)
+  graphics::mtext(captionText, side = 1, line = 4)
+}
+
+# Inline plot
+drawQualityHist(h, xMin, xMax, ylim, ticks, sgcQuality,
+                "Quality scores of degeneracy-preserving random genetic codes",
+                sprintf("Histogram of %d random codes; red line = SGC benchmark", length(randQual)))
+
+# Save PNG
+if (!dir.exists("out")) dir.create("out", recursive = TRUE)
+grDevices::png(filename = outPng, width = 1400, height = 900, res = 150)
+drawQualityHist(h, xMin, xMax, ylim, ticks, sgcQuality,
+                "Quality scores of degeneracy-preserving random genetic codes",
+                sprintf("Histogram of %d random codes; red line = SGC benchmark", length(randQual)))
+invisible(grDevices::dev.off())
+cat(sprintf("Saved figure: %s\n", outPng))
+```
+
+
+# Results
+- The SGC quality score was **9856.116292**
+- A total of 10,000 random degeneracy-preserving genetic codes were generated 
+- Their quality scores ranged from **10037.317** to **11582.309** (mean = **11035.726**, SD = **273.514**)
+- The SGC's score lies at the 0.00th percentile, meaning that none of the random genetic code achieved a lower score 
+- Figure (1) shows the histogram of random-code quality scores, with the SGC marked as a red vertical line 
+- The distribution is approximately normal, centered around 11,000, with a narrow spread
+- SGC lies well bellow the bulk of the random-code distribution 
+
+# Conclusion 
+The results indicate that the SGC is highly optimized for tolerance to point mutations. Its total similarity score is lower that all 10,000 randomly generated codes, suggesting that amino-acid assignments in the SGC are not random. This implies strong evolutionary selection for minimizing the impact of single-base substitutions. This experiment demonstrates that the SGC performs exceptionally well in maintaining protein stability and function despite frequent point mutations. 
+
+# A Global Optimum 
+In this experiment, none of the 10,000 random codes achieved a lower quality score than the SGC. This suggests that the true optimum may lie very close to the SGC. However, this conclusion is limited by the randomization process: 1) we preserved codon degeneracy and stop codons 2) the randomization was completely blind, not directed. A broader search space might reveal comparable or superior codes. Within realistic biological limits, the SGC performs exceptionally close to an evolutionary optimum.  
+
+# References
+
+National Center for Biotechnology Information (NCBI). 2024. “The Genetic Codes.”
+**NCBI Taxonomy Database. Accessed October 2025.**
+https://www.ncbi.nlm.nih.gov/Taxonomy/taxonomyhome.html/index.cgi?chapter=cgencodes
+
+Steipe, B. 2025. CSB195 **Computational Biology Foundations: Amino Acid Similarity and Feature Space.** University of Toronto, course materials on Quercus. 
+
+# Appendix 
+## Experience Preparing the Report 
+Preparing this report required reviewing and learning more about the genetic code. I consulted various resources (books, library search, and online content) until I was confident enough that I understood the conceptual foundation of the assignment. Then, I outlined three main technical steps to complete the report:
+ 
+ - calculating SGC quality score, 
+ - generating random genetic codes and calculating their scores, 
+ - performing statistical analysis on the data
+
+After completing the computations, I focused on constructing and refining the report's structure and written components. 
+
+I gained a much deeper understanding of the genetic code and what it means that it's tolerant to point-mutations and how computational analysis can quantify this property. 
+
+## Role of AI Assistant - ChatGPT 5 thinking mode 
+ChatGPT was used as a technical collaborator throughout the project. It helped in:
+
+- checking my understanding of the assignment concepts and instructions
+- writing and editing R code
+- answering my questions on formatting and styling the document 
+- polishing writing (grammar and clarity)
+
+I had no prior experience in R or Quarto. Yet, I was able to complete this project by using articulate programming and by following prompt instructions discussed in class and mentioned in course material. 
+
+Effort was required to:
+
+- Verify code blocks and their output independently 
+- Keep ChatGPT responses relevant and focused 
+- Integrate all components into a fully coherent Quarto document 
+
+All final writings were reviewed and understood in full before submission. 
+
+## Self-Assessment
+
+- **Report:** Clear and well-structured, with a logical flow of information. Integrates biology and computation effectively, following report-writing guidelines and clearly communicating objectives, methods, results, and conclusions
+
+- **Code:** Fully reproducible, executes without error, validated against course material. Well documented and maintains accuracy in biology. 
+
+- **Hybrid contribution:** AI was used as an enhancement tool. It handled tasks I did not have experience in while I guided reasoning and validation
+
+**Overall Evaluation: Excellent 80–89%**
+Demonstrate understanding of concepts and methods. Effective collaboration with AI. Complete reproducible and well-presented work. 
